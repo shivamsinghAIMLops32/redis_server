@@ -1,6 +1,11 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
+
+mod parser;
+use parser::{Command, parse_command};
+
+
 fn main() {
     // 1. Bind to a port (Open the front door)
     let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
@@ -31,11 +36,30 @@ fn main() {
                                 }
 
                                 // 5. Translate the raw bytes into a String
-                                let command = String::from_utf8_lossy(&buffer[..size]);
-                                println!("Received command: {}", command);
+                                let raw_text = String::from_utf8_lossy(&buffer[..size]);
+                                // println!("Received command: {}", raw_text);
 
-                                // 4. Send a response back!
-                                stream.write_all(b"+PONG\r\n").unwrap();
+                                // 3. Use the function from our module to parse the raw_text
+                                let command = parse_command(&raw_text);
+                                println!("Parsed: {:?}", command);
+
+                                match command {
+                                    Command::Ping => {
+                                        stream.write_all(b"+PONG\r\n").unwrap();
+                                    }
+                                    Command::Set(key, value) => {
+                                        println!("(Pretend) Saving {} = {}", key, value);
+                                        stream.write_all(b"+OK\r\n").unwrap();
+                                    }
+                                    Command::Get(key) => {
+                                        println!("(Pretend) Looking up {}", key);
+                                        stream.write_all(b"$-1\r\n").unwrap(); 
+                                    }
+                                    Command::Unknown(cmd) => {
+                                        let response = format!("-ERR unknown command '{}'\r\n", cmd);
+                                        stream.write_all(response.as_bytes()).unwrap();
+                                    }
+                                }
                             }
                             Err(e) => {
                                 println!("Failed to read data: {}", e);
