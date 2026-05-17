@@ -5,13 +5,25 @@ use std::thread;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+// to handle ttl
+use std::time::{SystemTime, Duration};
+
 mod parser;
 use parser::{Command, parse_command};
+
+
+// 2. Create a Struct to hold our complex data
+#[derive(Debug)]
+struct DbValue {
+    data: String,
+    expires_at: Option<SystemTime>, // "Option" because some keys live forever
+}
+
 
 fn main() {
     //  Create the database state
     // We wrap our HashMap in a Mutex, and then wrap that in an Arc.
-    let db = Arc::new(Mutex::new(HashMap::new()));
+    let db = Arc::new(Mutex::new(HashMap::<String, DbValue>::new()));
 
     // 1. Bind to a port (Open the front door)
     let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
@@ -60,20 +72,54 @@ fn main() {
                                     Command::Set(key, value) => {
                                         //  Lock the database, insert the data, let go of the lock
                                         let mut map = db_clone.lock().unwrap();
-                                        map.insert(key, value);
+                                        map.insert(key, DbValue {
+                                            data: value,
+                                            expires_at: None, 
+                                        });
                                         stream.write_all(b"+OK\r\n").unwrap();
                                     }
+
+                                    // expiry of a key in db
+                                    Command::SetEx(key, seconds, value) => {
+                                        let mut map = db_clone.lock().unwrap();
+                                        // 4. Calculate exactly when this key should die
+                                        let expiration_time = SystemTime::now() + Duration::from_secs(seconds);
+                                        
+                                        map.insert(key, DbValue {
+                                            data: value,
+                                            expires_at: Some(expiration_time),
+                                        });
+                                        stream.write_all(b"+OK\r\n").unwrap();
+                                    }
+
+
                                     Command::Get(key) => {
                                         //  Lock the database, read the data, let go of the lock
-                                        let map = db_clone.lock().unwrap();
+                                        let mut map = db_clone.lock().unwrap();
+                                        //  Lazy Expiration Logic
+                                        let mut should_delete = false;
+
+                                        if let Some(db_value) = map.get(&key) {
+                                            if let Some(expiration) = db_value.expires_at {
+                                                // Is the current time PAST the expiration time?
+                                                if SystemTime::now() > expiration {
+                                                    should_delete = true;
+                                                }
+                                            }
+                                        }
+
+                                        if should_delete {
+                                            println!("Key '{}' expired! Deleting...", key);
+                                            map.remove(&key); // Clean it up!
+                                        }
+
                                         match map.get(&key) {
                                             Some(val) => {
-                                                // Format it the way Redis expects for text
-                                                let response = format!("+{}\r\n", val);
+                                                let response = format!("+{}\r\n", val.data);
                                                 stream.write_all(response.as_bytes()).unwrap();
                                             }
                                             None => {
-                                                stream.write_all(b"$-1\r\n").unwrap();
+                                                stream.write_all(b"$-1\r\n").unwrap(); 
                                             }
                                         };
                                     }

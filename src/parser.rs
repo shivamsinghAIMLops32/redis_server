@@ -3,6 +3,7 @@
 pub enum Command {
     Ping,
     Set(String, String),
+    SetEx(String, u64, String), // Key, Seconds, Value
     Get(String),
     Unknown(String),
 }
@@ -19,6 +20,13 @@ pub fn parse_command(input: &str) -> Command {
             let key = parts.next().unwrap_or("").to_string();
             let value = parts.next().unwrap_or("").to_string();
             Command::Set(key, value)
+        }
+        "SETEX" => {
+            let key = parts.next().unwrap_or("").to_string();
+            // Parse the seconds into a number, default to 0 if they type text by mistake
+            let seconds = parts.next().unwrap_or("0").parse::<u64>().unwrap_or(0);
+            let value = parts.next().unwrap_or("").to_string();
+            Command::SetEx(key, seconds, value)
         }
         "GET" => {
             let key = parts.next().unwrap_or("").to_string();
