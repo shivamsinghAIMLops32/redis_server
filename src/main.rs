@@ -13,6 +13,8 @@ fn main() {
             Ok(mut stream) => {
                 println!("A new client connected!");
 
+
+                loop{
                 // make a bucket to store buffer sent by user in terminal
                 let mut buffer = [0; 512];
 
@@ -21,13 +23,24 @@ fn main() {
                 // and the data in buffer filled by stream.read is the command sent by user in terminal
                 match stream.read(&mut buffer){
                     Ok(size) => {
+                        // 3. Handle the client disconnecting
+                            if size == 0 {
+                                println!("Client disconnected.");
+                                break;
+                            }
+
+
                         // 5. Translate the raw bytes into a String
                         let command = String::from_utf8_lossy(&buffer[..size]);
                         println!("Received command: {}", command);
+
+                        // 4. Send a response back!
+                            stream.write_all(b"+PONG\r\n").unwrap();
                     }
                     Err(e) => {
                         println!("Failed to read data: {}", e);
                     }
+                }
                 }
             }
             Err(e) => {
