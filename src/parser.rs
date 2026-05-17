@@ -1,12 +1,16 @@
-// We add "pub" so main.rs is allowed to see this enum
 #[derive(Debug)]
 pub enum Command {
     Ping,
     Set(String, String),
-    SetEx(String, u64, String), // Key, Seconds, Value
+    SetEx(String, u64, String),
     Get(String),
+    // Make sure these two lines are here!
+    Subscribe(String),
+    Publish(String, String),
     Unknown(String),
 }
+
+// ... rest of your parse_command function ...
 
 // We add "pub" so main.rs is allowed to call this function
 pub fn parse_command(input: &str) -> Command {
@@ -31,6 +35,16 @@ pub fn parse_command(input: &str) -> Command {
         "GET" => {
             let key = parts.next().unwrap_or("").to_string();
             Command::Get(key)
+        }
+        "SUBSCRIBE" => {
+            let channel = parts.next().unwrap_or("").to_string();
+            Command::Subscribe(channel)
+        }
+        "PUBLISH" => {
+            let channel = parts.next().unwrap_or("").to_string();
+            // Collect the rest of the words as the message
+            let message = parts.collect::<Vec<&str>>().join(" ");
+            Command::Publish(channel, message)
         }
         _ => Command::Unknown(cmd),
     }

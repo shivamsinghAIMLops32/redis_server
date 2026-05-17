@@ -1,26 +1,21 @@
-// src/main.rs
-
 use std::net::TcpListener;
 use std::io::{Read, Write};
 use std::thread;
 
 mod parser;
-mod db; // 1. Tell Rust about our new db.rs file
+mod db;
 
 use parser::{Command, parse_command};
-use db::Database; // 2. Import our Database struct
+use db::Database;
 
 fn main() {
-    // 3. Initialize our clean, abstracted database!
     let db = Database::new(); 
-
     let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
     println!("Mini-Redis is listening on port 6379!");
 
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => { 
-                // 4. Clone the database reference for this thread
                 let db_clone = db.clone(); 
 
                 thread::spawn(move || {
@@ -38,7 +33,6 @@ fn main() {
                                         stream.write_all(b"+PONG\r\n").unwrap();
                                     }
                                     Command::Set(key, value) => {
-                                        // 5. Look how clean this is!
                                         db_clone.set(key, value); 
                                         stream.write_all(b"+OK\r\n").unwrap();
                                     }
@@ -47,7 +41,6 @@ fn main() {
                                         stream.write_all(b"+OK\r\n").unwrap();
                                     }
                                     Command::Get(key) => {
-                                        // 6. Handle the Option returned by our DB
                                         match db_clone.get(&key) {
                                             Some(val) => {
                                                 let response = format!("+{}\r\n", val);
@@ -57,6 +50,24 @@ fn main() {
                                                 stream.write_all(b"$-1\r\n").unwrap(); 
                                             }
                                         }
+                                    }
+                                    // --- NEW PUB/SUB LOGIC ---
+                                    Command::Subscribe(channel) => {
+                                        // 1. Clone the socket handle safely
+                                        let stream_clone = stream.try_clone().expect("Failed to clone stream");
+                                        // 2. Hand the clone over to the database to store
+                                        db_clone.subscribe(channel.clone(), stream_clone);
+                                        
+                                        let response = format!("+SUBSCRIBED to {}\r\n", channel);
+                                        stream.write_all(response.as_bytes()).unwrap();
+                                    }
+                                    Command::Publish(channel, msg) => {
+                                        // 3. Broadcast the message and find out how many heard it
+                                        let count = db_clone.publish(&channel, &msg);
+                                        
+                                        // Redis replies with the integer count of receivers (e.g., ":2\r\n")
+                                        let response = format!(":{}\r\n", count);
+                                        stream.write_all(response.as_bytes()).unwrap();
                                     }
                                     Command::Unknown(cmd) => {
                                         let response = format!("-ERR unknown command '{}'\r\n", cmd);

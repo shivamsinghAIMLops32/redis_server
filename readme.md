@@ -1,116 +1,120 @@
 # Mini-Redis Server in Rust
 
-A lightweight, multi-threaded, in-memory key-value store built from scratch in Rust. This project mimics the behavior of a simple Redis server, supporting concurrent client connections, basic caching commands (`SET`, `GET`, `PING`), and Time-To-Live (TTL) functionality using a lazy-expiration strategy.
+A lightweight, multi-threaded, in-memory key-value store built from scratch in Rust. This project mimics the behavior of a simple Redis server, supporting concurrent client connections, caching commands (`SET`, `GET`, `PING`), Time-To-Live (TTL) functionality, and **Publish/Subscribe (Pub/Sub)** messaging.
 
 ---
 
 ## 🏗️ Architecture & Step-by-Step Implementation
 
-### Step 1: TCP Server Setup & Port Binding
+### Step 1: Modularity & Database State
+We extracted the core logic into its own module `src/db.rs` to keep things clean. The `Database` struct holds two maps securely wrapped in `Arc` and `Mutex` to be totally thread-safe:
+1. `store`: Holds our key-value caching data.
+2. `pubsub`: A registry matching channel names to vectors of active `TcpStream` client connections.
 
-To allow clients to communicate with our DB, we first open a port using `TcpListener`. The server listens continuously for incoming connections on port `6379` (the default Redis port).
+```rust
+// src/db.rs
+#[derive(Clone)]
+pub struct Database {
+    store: Arc<Mutex<HashMap<String, DbValue>>>,
+    pubsub: Arc<Mutex<HashMap<String, Vec<TcpStream>>>>,
+}
+```
+
+### Step 2: TCP Server Setup & Port Binding
+
+To allow clients to communicate with our DB, we open a port using `TcpListener`. The server listens continuously for incoming connections on port `6379`.
 
 ```rust
 let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
 println!("Mini-Redis is listening on port 6379!");
 ```
 
-### Step 2: Accepting Concurrent Connections
+### Step 3: Accepting Concurrent Connections
 
-When a client connects, we receive a `TcpStream`. To handle multiple clients at once without blocking the main server, we spawn a new thread for each connection using `thread::spawn`.
+When a client connects, we receive a `TcpStream`. To handle multiple clients at once without blocking the main server, we spawn a new thread for each connection. We also clone the inner data states (cheaply) to share them correctly across threads.
 
 ```rust
 for stream in listener.incoming() {
     match stream {
         Ok(mut stream) => {
-            // Clone the Arc pointer for safe shared memory access
-            let db_clone = Arc::clone(&db);
-
+            let db_clone = db.clone(); 
             thread::spawn(move || {
-                // Thread-specific connection loop
+                // Thread-specific loop...
             });
         }
-        Err(_) => println!("Connection failed"),
+        Err(e) => println!("Failed to connect: {}", e),
     }
 }
 ```
 
-### Step 3: Reading Data into a Buffer
+### Step 4: Reading Data & Command Parsing
 
-Inside the thread loop, we create a buffer `[0; 512]` to accept data from the TCP stream. The `stream.read` method pulls the raw bytes sent by the user into the buffer. Once read, we convert these bytes into a usable UTF-8 string.
-
-```rust
-let mut buffer = [0; 512];
-match stream.read(&mut buffer) {
-    Ok(0) => break, // Client disconnected
-    Ok(size) => {
-        let raw_text = String::from_utf8_lossy(&buffer[..size]);
-        // ... parse command
-    }
-    // ...
-}
-```
-
-### Step 4: Command Parsing
-
-To make sense of the text inputs, the raw string is handed over to a custom parser. Using an `enum` and `.split_whitespace()`, we isolate the command and its arguments.
+Inside the loop, we buffer data coming from the user and parse the string logic via our custom `parser.rs`.
 
 ```rust
+// src/parser.rs
 pub enum Command {
     Ping,
     Set(String, String),
     SetEx(String, u64, String),
     Get(String),
+    Subscribe(String),
+    Publish(String, String),
     Unknown(String),
 }
-
-pub fn parse_command(input: &str) -> Command {
-    let mut parts = input.trim().split_whitespace();
-    let cmd = parts.next().unwrap_or("").to_uppercase();
-    // Match cases for PING, SET, SETEX, GET...
-}
 ```
 
-### Step 5: Shared State In-Memory Database (Arc & Mutex)
+We split inputs using `.split_whitespace()` iteratively, transforming commands into `Enum` variants.
 
-The core database is a standard Rust `HashMap`. Because multiple threads need to read and write to this map simultaneously, it is wrapped in an `Arc` (Atomic Reference Counted pointer) and a `Mutex` (Mutual Exclusion lock) for thread safety.
+### Step 5: Implementing TTL with "Lazy Expiration"
 
-```rust
-struct DbValue {
-    data: String,
-    expires_at: Option<SystemTime>,
-}
+Instead of spawning a complex background timer that drains CPU checking for expired keys, we use a **Lazy Expiration** approach. 
 
-// In main.rs:
-let db = Arc::new(Mutex::new(HashMap::<String, DbValue>::new()));
-```
-
-Whenever a command requires accessing the DB, the thread locks the Mutex, modifies the map, and releases the lock as soon as the scope ends.
-
-### Step 6: Implementing TTL with "Lazy Expiration"
-
-Instead of spawning a complex background thread that constantly drains CPU by checking for expired keys, we use a **Lazy Expiration** approach.
-
-When a `SETEX` command is received, we calculate the exact `SystemTime` it should expire and save it in the DB.
-When a `GET` command occurs, we first check the key's timestamp against the current clock. If it's expired, we seamlessly delete it right then and return a blank payload (`$-1\r\n`).
+When a `SETEX` command is received, we calculate the exact `SystemTime` it should expire and save it in the DB. Whenever a `GET` command requests data, the `db.get()` first verifies whether the object expired. If expired, we seamlessly delete it right then.
 
 ```rust
-// Inside GET handler:
-let mut should_delete = false;
+pub fn get(&self, key: &str) -> Option<String> {
+    let mut map = self.store.lock().unwrap();
+    let mut should_delete = false;
 
-if let Some(db_value) = map.get(&key) {
-    if let Some(expiration) = db_value.expires_at {
-        if SystemTime::now() > expiration {
-            should_delete = true;
+    if let Some(val) = map.get(key) {
+        if let Some(exp) = val.expires_at {
+            if SystemTime::now() > exp { should_delete = true; }
         }
     }
+    if should_delete { map.remove(key); return None; }
+    map.get(key).map(|v| v.data.clone()) 
 }
+```
 
-if should_delete {
-    map.remove(&key);
+### Step 6: Implementing Publish/Subscribe (Pub/Sub)
+
+The server permits clients to subscribe to specific channels via `SUBSCRIBE <channel>`. We store a `.try_clone()` of their `TcpStream` into the database's `pubsub` registry.
+When another user broadcasts a message via `PUBLISH <channel> <message>`, we lock the map and broadcast the message down the saved network streams. 
+
+To gracefully handle disconnected subscribers, we rely on the `Vec::retain_mut` iterator trick paired with `write_all`.
+
+```rust
+pub fn publish(&self, channel: &str, message: &str) -> usize {
+    let mut ps = self.pubsub.lock().unwrap();
+    let mut successful_sends = 0;
+
+    if let Some(subscribers) = ps.get_mut(channel) {
+        subscribers.retain_mut(|stream| {
+            let msg = format!("+MESSAGE {} {}\r\n", channel, message);
+            // Try to write. If it fails, return false to remove the zombie stream from the array
+            if stream.write_all(msg.as_bytes()).is_ok() {
+                successful_sends += 1;
+                true 
+            } else {
+                false 
+            }
+        });
+    }
+    successful_sends
 }
 ```
 
 ### Step 7: Replying to the Client
 
-Every successful computation pushes a response string back to the user via `stream.write_all(response.as_bytes())`. For example, `SET` returns `+OK\r\n`, whereas an unknown command replies with `-ERR unknown command...`.
+Every successful routine answers the client in standard text format. E.g., `SET` returns `+OK\r\n`, and `PUBLISH` returns an integer count of receivers `:2\r\n`.
