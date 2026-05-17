@@ -7,7 +7,9 @@ A lightweight, multi-threaded, in-memory key-value store built from scratch in R
 ## 🏗️ Architecture & Step-by-Step Implementation
 
 ### Step 1: Modularity & Database State
+
 We extracted the core logic into its own module `src/db.rs` to keep things clean. The `Database` struct holds two maps securely wrapped in `Arc` and `Mutex` to be totally thread-safe:
+
 1. `store`: Holds our key-value caching data.
 2. `pubsub`: A registry matching channel names to vectors of active `TcpStream` client connections.
 
@@ -37,7 +39,7 @@ When a client connects, we receive a `TcpStream`. To handle multiple clients at 
 for stream in listener.incoming() {
     match stream {
         Ok(mut stream) => {
-            let db_clone = db.clone(); 
+            let db_clone = db.clone();
             thread::spawn(move || {
                 // Thread-specific loop...
             });
@@ -68,7 +70,7 @@ We split inputs using `.split_whitespace()` iteratively, transforming commands i
 
 ### Step 5: Implementing TTL with "Lazy Expiration"
 
-Instead of spawning a complex background timer that drains CPU checking for expired keys, we use a **Lazy Expiration** approach. 
+Instead of spawning a complex background timer that drains CPU checking for expired keys, we use a **Lazy Expiration** approach.
 
 When a `SETEX` command is received, we calculate the exact `SystemTime` it should expire and save it in the DB. Whenever a `GET` command requests data, the `db.get()` first verifies whether the object expired. If expired, we seamlessly delete it right then.
 
@@ -83,14 +85,14 @@ pub fn get(&self, key: &str) -> Option<String> {
         }
     }
     if should_delete { map.remove(key); return None; }
-    map.get(key).map(|v| v.data.clone()) 
+    map.get(key).map(|v| v.data.clone())
 }
 ```
 
 ### Step 6: Implementing Publish/Subscribe (Pub/Sub)
 
 The server permits clients to subscribe to specific channels via `SUBSCRIBE <channel>`. We store a `.try_clone()` of their `TcpStream` into the database's `pubsub` registry.
-When another user broadcasts a message via `PUBLISH <channel> <message>`, we lock the map and broadcast the message down the saved network streams. 
+When another user broadcasts a message via `PUBLISH <channel> <message>`, we lock the map and broadcast the message down the saved network streams.
 
 To gracefully handle disconnected subscribers, we rely on the `Vec::retain_mut` iterator trick paired with `write_all`.
 
@@ -105,9 +107,9 @@ pub fn publish(&self, channel: &str, message: &str) -> usize {
             // Try to write. If it fails, return false to remove the zombie stream from the array
             if stream.write_all(msg.as_bytes()).is_ok() {
                 successful_sends += 1;
-                true 
+                true
             } else {
-                false 
+                false
             }
         });
     }
@@ -118,3 +120,11 @@ pub fn publish(&self, channel: &str, message: &str) -> usize {
 ### Step 7: Replying to the Client
 
 Every successful routine answers the client in standard text format. E.g., `SET` returns `+OK\r\n`, and `PUBLISH` returns an integer count of receivers `:2\r\n`.
+
+### Step 8: Benchmarking
+
+A benchmarking tool has been included as a separate binary to test the performance of our Mini-Redis implementation under load. It tests different commands such as `PING`, `SET`, and `GET` using Tokio for high concurrency. You can run the benchmark via:
+
+```bash
+cargo run --bin benchmark
+```

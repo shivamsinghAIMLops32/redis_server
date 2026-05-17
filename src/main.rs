@@ -1,6 +1,7 @@
-use std::net::TcpListener;
-use std::io::{Read, Write};
-use std::thread;
+// src/main.rs
+
+use tokio::net::TcpListener;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 mod parser;
 mod db;
@@ -8,20 +9,25 @@ mod db;
 use parser::{Command, parse_command};
 use db::Database;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let db = Database::new(); 
-    let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
-    println!("Mini-Redis is listening on port 6379!");
+    
+    let listener = TcpListener::bind("127.0.0.1:6379").await.unwrap();
+    println!("Mini-Redis (Async/Tokio) is listening on port 6379!");
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(mut stream) => { 
+    loop {
+        match listener.accept().await {
+            Ok((mut stream, _addr)) => {
+                stream.set_nodelay(true).unwrap();
+                
                 let db_clone = db.clone(); 
-
-                thread::spawn(move || {
+                
+                tokio::spawn(async move {
                     loop {
                         let mut buffer = [0; 512]; 
-                        match stream.read(&mut buffer) {
+                        
+                        match stream.read(&mut buffer).await {
                             Ok(size) => {
                                 if size == 0 { break; }
 
@@ -30,48 +36,54 @@ fn main() {
 
                                 match command {
                                     Command::Ping => {
-                                        stream.write_all(b"+PONG\r\n").unwrap();
+                                        stream.write_all(b"+PONG\r\n").await.unwrap();
                                     }
                                     Command::Set(key, value) => {
                                         db_clone.set(key, value); 
-                                        stream.write_all(b"+OK\r\n").unwrap();
+                                        stream.write_all(b"+OK\r\n").await.unwrap();
                                     }
                                     Command::SetEx(key, seconds, value) => {
                                         db_clone.set_ex(key, seconds, value);
-                                        stream.write_all(b"+OK\r\n").unwrap();
+                                        stream.write_all(b"+OK\r\n").await.unwrap();
                                     }
                                     Command::Get(key) => {
                                         match db_clone.get(&key) {
                                             Some(val) => {
                                                 let response = format!("+{}\r\n", val);
-                                                stream.write_all(response.as_bytes()).unwrap();
+                                                stream.write_all(response.as_bytes()).await.unwrap();
                                             }
                                             None => {
-                                                stream.write_all(b"$-1\r\n").unwrap(); 
+                                                stream.write_all(b"$-1\r\n").await.unwrap(); 
                                             }
                                         }
                                     }
-                                    // --- NEW PUB/SUB LOGIC ---
                                     Command::Subscribe(channel) => {
-                                        // 1. Clone the socket handle safely
-                                        let stream_clone = stream.try_clone().expect("Failed to clone stream");
-                                        // 2. Hand the clone over to the database to store
-                                        db_clone.subscribe(channel.clone(), stream_clone);
+                                        let mut rx = db_clone.subscribe(channel.clone());
                                         
                                         let response = format!("+SUBSCRIBED to {}\r\n", channel);
-                                        stream.write_all(response.as_bytes()).unwrap();
+                                        stream.write_all(response.as_bytes()).await.unwrap();
+
+                                        loop {
+                                            match rx.recv().await {
+                                                Ok(msg) => {
+                                                    let response = format!("+MESSAGE {} {}\r\n", channel, msg);
+                                                    if stream.write_all(response.as_bytes()).await.is_err() {
+                                                        break; 
+                                                    }
+                                                }
+                                                Err(_) => break, 
+                                            }
+                                        }
+                                        break; 
                                     }
                                     Command::Publish(channel, msg) => {
-                                        // 3. Broadcast the message and find out how many heard it
                                         let count = db_clone.publish(&channel, &msg);
-                                        
-                                        // Redis replies with the integer count of receivers (e.g., ":2\r\n")
                                         let response = format!(":{}\r\n", count);
-                                        stream.write_all(response.as_bytes()).unwrap();
+                                        stream.write_all(response.as_bytes()).await.unwrap();
                                     }
                                     Command::Unknown(cmd) => {
                                         let response = format!("-ERR unknown command '{}'\r\n", cmd);
-                                        stream.write_all(response.as_bytes()).unwrap();
+                                        stream.write_all(response.as_bytes()).await.unwrap();
                                     }
                                 }
                             }
@@ -80,7 +92,7 @@ fn main() {
                     }
                 });
             }
-            Err(e) => println!("Failed to connect: {}", e),
+            Err(e) => println!("Failed to accept connection: {}", e),
         }
     }
 }
