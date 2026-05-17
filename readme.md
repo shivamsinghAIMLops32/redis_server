@@ -12,3 +12,7 @@ let command = String::from_utf8_lossy(&buffer[..size]);
 then we write a respones back to user using stream.writeall in binary not string
 then we had a continuous loop to keep litening each commands
 then we created thread to handle concurrent connection from multiple users
+
+wrote a basic parser function and enum to handle user input
+
+now we can create our hashmap inmemeory db but use arc and mutex to safely share it in many threads

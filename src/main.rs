@@ -2,11 +2,17 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 mod parser;
 use parser::{Command, parse_command};
 
-
 fn main() {
+    //  Create the database state
+    // We wrap our HashMap in a Mutex, and then wrap that in an Arc.
+    let db = Arc::new(Mutex::new(HashMap::new()));
+
     // 1. Bind to a port (Open the front door)
     let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
 
@@ -18,6 +24,10 @@ fn main() {
             // making stream mutable because we will need to read from it later
             Ok(mut stream) => {
                 println!("A new client connected!");
+
+                //  Clone the Arc pointer (NOT the whole database)
+                // This gives this specific thread its own key to access the Mutex
+                let db_clone = Arc::clone(&db);
 
                 thread::spawn(move || {
                     loop {
@@ -48,15 +58,28 @@ fn main() {
                                         stream.write_all(b"+PONG\r\n").unwrap();
                                     }
                                     Command::Set(key, value) => {
-                                        println!("(Pretend) Saving {} = {}", key, value);
+                                        //  Lock the database, insert the data, let go of the lock
+                                        let mut map = db_clone.lock().unwrap();
+                                        map.insert(key, value);
                                         stream.write_all(b"+OK\r\n").unwrap();
                                     }
                                     Command::Get(key) => {
-                                        println!("(Pretend) Looking up {}", key);
-                                        stream.write_all(b"$-1\r\n").unwrap(); 
+                                        //  Lock the database, read the data, let go of the lock
+                                        let map = db_clone.lock().unwrap();
+                                        match map.get(&key) {
+                                            Some(val) => {
+                                                // Format it the way Redis expects for text
+                                                let response = format!("+{}\r\n", val);
+                                                stream.write_all(response.as_bytes()).unwrap();
+                                            }
+                                            None => {
+                                                stream.write_all(b"$-1\r\n").unwrap();
+                                            }
+                                        };
                                     }
                                     Command::Unknown(cmd) => {
-                                        let response = format!("-ERR unknown command '{}'\r\n", cmd);
+                                        let response =
+                                            format!("-ERR unknown command '{}'\r\n", cmd);
                                         stream.write_all(response.as_bytes()).unwrap();
                                     }
                                 }
